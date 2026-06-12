@@ -434,7 +434,6 @@ export async function execute(
 
   // ── Resolve configuration ──────────────────────────────────────────────
   const hermesCmd = cfgString(config.hermesCommand) || HERMES_CLI;
-  const model = cfgString(config.model) || DEFAULT_MODEL;
   const timeoutSec = cfgNumber(config.timeoutSec) || DEFAULT_TIMEOUT_SEC;
   const graceSec = cfgNumber(config.graceSec) || DEFAULT_GRACE_SEC;
   const maxTurns = cfgNumber(config.maxTurnsPerRun);
@@ -444,26 +443,28 @@ export async function execute(
   const worktreeMode = cfgBoolean(config.worktreeMode) === true;
   const checkpoints = cfgBoolean(config.checkpoints) === true;
 
+  // ── Detect Hermes config early ────────────────────────────────────────
+  // Read ~/.hermes/config.yaml before resolving model/provider so we can
+  // use the Hermes default model as a fallback if no model is specified
+  // in adapterConfig. This fixes the issue where DEFAULT_MODEL
+  // (anthropic/claude-sonnet-4) would override a user's configured model.
+  let detectedConfig: Awaited<ReturnType<typeof detectModel>> | null = null;
+  try {
+    detectedConfig = await detectModel();
+  } catch {
+    // Non-fatal — detection failure shouldn't block execution
+  }
+
+  // Resolve model: adapterConfig > Hermes config > DEFAULT_MODEL
+  const model = cfgString(config.model) || detectedConfig?.model || DEFAULT_MODEL;
+
   // ── Resolve provider (defense in depth) ────────────────────────────────
   // Priority chain:
   //   1. Explicit provider in adapterConfig (user override)
-  //   2. Provider from ~/.hermes/config.yaml (detected at runtime)
+  //   2. Provider from ~/.hermes/config.yaml (already detected above)
   //   3. Provider inferred from model name prefix
   //   4. "auto" (let Hermes decide)
-  //
-  // This ensures that even if the agent was created before provider tracking
-  // was added, or if the model was changed without updating provider, the
-  // correct provider is still used.
-  let detectedConfig: Awaited<ReturnType<typeof detectModel>> | null = null;
   const explicitProvider = cfgString(config.provider);
-
-  if (!explicitProvider) {
-    try {
-      detectedConfig = await detectModel();
-    } catch {
-      // Non-fatal — detection failure shouldn't block execution
-    }
-  }
 
   const { provider: resolvedProvider, resolvedFrom } = resolveProvider({
     explicitProvider,

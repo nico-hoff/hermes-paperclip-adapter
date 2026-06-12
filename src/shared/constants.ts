@@ -29,6 +29,8 @@ export const VALID_PROVIDERS = [
   "openrouter",
   "nous",
   "openai-codex",
+  "opencode-go",
+  "opencode-codex",
   "copilot",
   "copilot-acp",
   "anthropic",
@@ -49,6 +51,9 @@ export const VALID_PROVIDERS = [
  * Longer prefixes are matched first (order matters).
  */
 export const MODEL_PREFIX_PROVIDER_HINTS: [string, string][] = [
+  // OpenCode models (via OpenCode.go)
+  ["gptdoc-", "opencode-go"],
+  ["grok-", "opencode-go"],
   // OpenAI-native models
   ["gpt-4", "openai-codex"],
   ["gpt-5", "copilot"],

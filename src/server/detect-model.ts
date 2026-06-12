@@ -148,10 +148,13 @@ export function resolveProvider(options: {
   // 2. Provider from Hermes config file — but ONLY if the config model matches
   //    the requested model. Otherwise the config provider is for a different model
   //    and would cause exactly the kind of routing bug we're fixing.
+  //
+  //    We trust ANY provider from Hermes config unconditionally — no validation
+  //    against VALID_PROVIDERS. This allows plugin providers (ollama-launch,
+  //    opencode-go) and future providers not in the hardcoded list to work.
   if (
     detectedProvider &&
     detectedModel &&
-    (VALID_PROVIDERS as readonly string[]).includes(detectedProvider) &&
     // Config model matches requested model (exact or case-insensitive)
     detectedModel.toLowerCase() === model?.toLowerCase()
   ) {
