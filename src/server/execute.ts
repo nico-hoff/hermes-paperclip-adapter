@@ -455,6 +455,17 @@ export async function execute(
   // Resolve model: adapterConfig > Hermes config > DEFAULT_MODEL
   const model = cfgString(config.model) || detectedConfig?.model || DEFAULT_MODEL;
 
+  // ── Resolve Paperclip API URL ──────────────────────────────────────────
+  // Used for posting usage data back to Paperclip after execution
+  let paperclipApiUrl =
+    cfgString(config.paperclipApiUrl) ||
+    process.env.PAPERCLIP_API_URL ||
+    "http://127.0.0.1:3100/api";
+  // Ensure /api suffix
+  if (!paperclipApiUrl.endsWith("/api")) {
+    paperclipApiUrl = paperclipApiUrl.replace(/\/+$/, "") + "/api";
+  }
+
   // ── Resolve provider (defense in depth) ────────────────────────────────
   // Priority chain:
   //   1. Explicit provider in adapterConfig (user override)
@@ -713,6 +724,49 @@ export async function execute(
   if (persistSession && isValidSessionId(parsed.sessionId)) {
     executionResult.sessionParams = { sessionId: parsed.sessionId };
     executionResult.sessionDisplayId = parsed.sessionId.slice(0, 16);
+  }
+
+  // ── Post usage data back to Paperclip ─────────────────────────────────
+  // Write token usage and cost to heartbeat_runs table so Paperclip UI
+  // can display token consumption and aggregate costs per agent/company.
+  // This fixes #145 — data was extracted but never persisted.
+  if ((parsed.usage || parsed.costUsd !== undefined) && ctx.authToken) {
+    try {
+      const endpoint = `${paperclipApiUrl}/v1/heartbeat-runs/${ctx.runId}`;
+      const payload: { usageJson?: unknown; totalCostUsd?: number } = {};
+
+      if (parsed.usage) {
+        payload.usageJson = {
+          inputTokens: parsed.usage.inputTokens,
+          outputTokens: parsed.usage.outputTokens,
+        };
+      }
+
+      if (parsed.costUsd !== undefined) {
+        payload.totalCostUsd = parsed.costUsd;
+      }
+
+      // Non-blocking PATCH — don't fail the entire run if this fails
+      const response = await fetch(endpoint, {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${ctx.authToken}`,
+          "X-Paperclip-Run-Id": ctx.runId,
+        },
+        body: JSON.stringify(payload),
+      });
+
+      if (!response.ok) {
+        // Log warning but don't throw — usage reporting is not critical to execution
+        console.warn(
+          `[hermes-adapter] Failed to post usage data to Paperclip: ${response.status} ${response.statusText}`
+        );
+      }
+    } catch (error) {
+      // Non-fatal — log but continue
+      console.warn(`[hermes-adapter] Error posting usage data:`, error);
+    }
   }
 
   return executionResult;
