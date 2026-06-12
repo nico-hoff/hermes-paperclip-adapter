@@ -247,24 +247,23 @@ function buildPrompt(
 // Output parsing
 // ---------------------------------------------------------------------------
 
-/** Regex to extract session ID from Hermes quiet-mode output: "session_id: <id>" */
-const SESSION_ID_REGEX = /^session_id:\s*(\S+)/m;
-
-/** Regex for legacy session output format */
-const SESSION_ID_REGEX_LEGACY = /session[_ ](?:id|saved)[:\s]+([a-zA-Z0-9_-]+)/i;
+/**
+ * Regex to extract session ID from Hermes quiet-mode output: "session_id: <id>"
+ *
+ * Hermes session IDs follow the format: YYYYMMDD_HHMMSS_<hex>
+ * Example: 20260612_143022_a3b8f4c
+ *
+ * This strict format prevents accidentally parsing error messages like
+ * "Use a session ID from a previous run" → capturing "from" as the session ID.
+ *
+ * Fixes #75, #142, #131
+ */
+const SESSION_ID_REGEX = /^session_id:\s*(\d{8}_\d{6}_[a-f0-9]+)\s*$/m;
 
 /**
- * Shape of a real Hermes session ID, e.g. "20260609_153047_5568c8"
- * (YYYYMMDD_HHMMSS_<suffix>).
- *
- * This guard exists because the loose legacy regex above also matches prose
- * such as Hermes' own error message "Use a session ID from a previous CLI
- * run", capturing the word "from" as a session ID. That bogus value was then
- * persisted and replayed as `hermes --resume from`, which fails with
- * "Session not found: from" — printing the same message again, re-capturing
- * "from", and stranding the run in a permanent recovery loop. Validating
- * captured/stored IDs against this shape both prevents the bad capture and
- * lets an already-poisoned agent self-heal by starting a fresh session.
+ * Shape of a real Hermes session ID (YYYYMMDD_HHMMSS_<hex>).
+ * Exported so tests and the isValidSessionId guard can validate stored IDs,
+ * allowing an already-poisoned agent to self-heal by starting a fresh session.
  */
 const SESSION_ID_SHAPE = /^\d{8}_\d{6}_[0-9a-z]+$/i;
 export function isValidSessionId(id: unknown): id is string {
@@ -311,7 +310,6 @@ export function sanitizeUserEnv(userEnv: unknown): {
   }
   return { env, warnings };
 }
-
 
 /** Regex to extract token usage from Hermes output. */
 const TOKEN_USAGE_REGEX =
@@ -378,11 +376,11 @@ export function parseHermesOutput(stdout: string, stderr: string): ParsedOutput 
       result.response = cleanResponse(stdout.slice(0, sessionLineIdx));
     }
   } else {
-    // Legacy format (non-quiet mode). The legacy regex is run against
-    // stdout+stderr, so it can match prose in error output — only accept a
-    // capture that actually looks like a session ID (see SESSION_ID_SHAPE).
-    const legacyMatch = combined.match(SESSION_ID_REGEX_LEGACY);
-    if (isValidSessionId(legacyMatch?.[1])) {
+    // Legacy format (non-quiet mode) — only accept structured session IDs in
+    // Hermes format (YYYYMMDD_HHMMSS_<hex>) to prevent prose like
+    // "session ID from a previous run" from being captured as a session ID.
+    const legacyMatch = combined.match(/\n(?:session[_](?:id|saved)|Session[_]ID)[:\s]+(\d{8}_\d{6}_[a-f0-9]+)/i);
+    if (legacyMatch?.[1]) {
       result.sessionId = legacyMatch[1];
     }
     // In non-quiet mode, extract clean response from stdout by
