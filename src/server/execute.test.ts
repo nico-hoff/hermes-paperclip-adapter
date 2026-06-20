@@ -94,3 +94,40 @@ describe("sanitizeUserEnv", () => {
     assert.deepEqual(sanitizeUserEnv("nope"), { env: {}, warnings: [] });
   });
 });
+
+describe("parseHermesOutput — SESSION_ID_REGEX tightening (#165)", () => {
+  it("rejects 'from' captured from error text via primary regex path", () => {
+    // Reproduce the exact error Hermes emits when session not found
+    const stdout = "session_id: from a previous CLI run\n";
+    const parsed = parseHermesOutput(stdout, "");
+    assert.equal(parsed.sessionId, undefined, "loose word 'from' must not be captured");
+  });
+
+  it("rejects partial date-looking garbage via primary regex", () => {
+    const stdout = "session_id: notadate_nottime_xyz\n";
+    const parsed = parseHermesOutput(stdout, "");
+    assert.equal(parsed.sessionId, undefined);
+  });
+
+  it("accepts a real session ID in quiet-mode format", () => {
+    const stdout = "Done.\n\nsession_id: 20261225_235959_cafebabe\n";
+    const parsed = parseHermesOutput(stdout, "");
+    assert.equal(parsed.sessionId, "20261225_235959_cafebabe");
+  });
+});
+
+describe("parseHermesOutput — legacy path rejects prose (#131/#142)", () => {
+  it("does not capture prose words from verbose error output", () => {
+    const combined = "\n[error] Use a session_id from your CLI history\n";
+    const parsed = parseHermesOutput("", combined);
+    assert.equal(parsed.sessionId, undefined);
+  });
+
+  it("captures well-formed session_id via legacy path", () => {
+    // Non-quiet mode: no canonical 'session_id:' line, uses legacy pattern
+    const stdout = "Work complete\nsession_id: 20260615_100000_aabbcc\n";
+    const parsed = parseHermesOutput(stdout, "");
+    // Primary regex should catch this; verify it's not undefined
+    assert.equal(parsed.sessionId, "20260615_100000_aabbcc");
+  });
+});

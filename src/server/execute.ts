@@ -247,24 +247,23 @@ function buildPrompt(
 // Output parsing
 // ---------------------------------------------------------------------------
 
-/** Regex to extract session ID from Hermes quiet-mode output: "session_id: <id>" */
-const SESSION_ID_REGEX = /^session_id:\s*(\S+)/m;
-
-/** Regex for legacy session output format */
-const SESSION_ID_REGEX_LEGACY = /session[_ ](?:id|saved)[:\s]+([a-zA-Z0-9_-]+)/i;
+/**
+ * Regex to extract session ID from Hermes quiet-mode output: "session_id: <id>"
+ *
+ * Hermes session IDs follow the format: YYYYMMDD_HHMMSS_<hex>
+ * Example: 20260612_143022_a3b8f4c
+ *
+ * This strict format prevents accidentally parsing error messages like
+ * "Use a session ID from a previous run" → capturing "from" as the session ID.
+ *
+ * Fixes #75, #142, #131
+ */
+const SESSION_ID_REGEX = /^session_id:\s*(\d{8}_\d{6}_[a-f0-9]+)\s*$/m;
 
 /**
- * Shape of a real Hermes session ID, e.g. "20260609_153047_5568c8"
- * (YYYYMMDD_HHMMSS_<suffix>).
- *
- * This guard exists because the loose legacy regex above also matches prose
- * such as Hermes' own error message "Use a session ID from a previous CLI
- * run", capturing the word "from" as a session ID. That bogus value was then
- * persisted and replayed as `hermes --resume from`, which fails with
- * "Session not found: from" — printing the same message again, re-capturing
- * "from", and stranding the run in a permanent recovery loop. Validating
- * captured/stored IDs against this shape both prevents the bad capture and
- * lets an already-poisoned agent self-heal by starting a fresh session.
+ * Shape of a real Hermes session ID (YYYYMMDD_HHMMSS_<hex>).
+ * Exported so tests and the isValidSessionId guard can validate stored IDs,
+ * allowing an already-poisoned agent to self-heal by starting a fresh session.
  */
 const SESSION_ID_SHAPE = /^\d{8}_\d{6}_[0-9a-z]+$/i;
 export function isValidSessionId(id: unknown): id is string {
@@ -311,7 +310,6 @@ export function sanitizeUserEnv(userEnv: unknown): {
   }
   return { env, warnings };
 }
-
 
 /** Regex to extract token usage from Hermes output. */
 const TOKEN_USAGE_REGEX =
@@ -378,11 +376,11 @@ export function parseHermesOutput(stdout: string, stderr: string): ParsedOutput 
       result.response = cleanResponse(stdout.slice(0, sessionLineIdx));
     }
   } else {
-    // Legacy format (non-quiet mode). The legacy regex is run against
-    // stdout+stderr, so it can match prose in error output — only accept a
-    // capture that actually looks like a session ID (see SESSION_ID_SHAPE).
-    const legacyMatch = combined.match(SESSION_ID_REGEX_LEGACY);
-    if (isValidSessionId(legacyMatch?.[1])) {
+    // Legacy format (non-quiet mode) — only accept structured session IDs in
+    // Hermes format (YYYYMMDD_HHMMSS_<hex>) to prevent prose like
+    // "session ID from a previous run" from being captured as a session ID.
+    const legacyMatch = combined.match(/\n(?:session[_ ](?:id|saved)|Session[_ ]ID)[:\s]+(\d{8}_\d{6}_[a-f0-9]+)/i);
+    if (legacyMatch?.[1]) {
       result.sessionId = legacyMatch[1];
     }
     // In non-quiet mode, extract clean response from stdout by
@@ -423,6 +421,16 @@ export function parseHermesOutput(stdout: string, stderr: string): ParsedOutput 
 }
 
 // ---------------------------------------------------------------------------
+// Concurrency guard (#90)
+// ---------------------------------------------------------------------------
+
+// Track agents that currently have a Hermes run in flight. A second concurrent
+// run for the same agent serializes on Hermes session files and causes Paperclip
+// to spawn additional retries, creating a self-reinforcing retry storm that fills
+// the 10-min run backlog. Returning early breaks the cycle.
+const IN_FLIGHT_AGENTS = new Set<string>();
+
+// ---------------------------------------------------------------------------
 // Main execute
 // ---------------------------------------------------------------------------
 
@@ -457,6 +465,17 @@ export async function execute(
   // Resolve model: adapterConfig > Hermes config > DEFAULT_MODEL
   const model = cfgString(config.model) || detectedConfig?.model || DEFAULT_MODEL;
 
+  // ── Resolve Paperclip API URL ──────────────────────────────────────────
+  // Used for posting usage data back to Paperclip after execution
+  let paperclipApiUrl =
+    cfgString(config.paperclipApiUrl) ||
+    process.env.PAPERCLIP_API_URL ||
+    "http://127.0.0.1:3100/api";
+  // Ensure /api suffix
+  if (!paperclipApiUrl.endsWith("/api")) {
+    paperclipApiUrl = paperclipApiUrl.replace(/\/+$/, "") + "/api";
+  }
+
   // ── Resolve provider (defense in depth) ────────────────────────────────
   // Priority chain:
   //   1. Explicit provider in adapterConfig (user override)
@@ -472,6 +491,60 @@ export async function execute(
     model,
   });
 
+  // ── Terminal-status guard (#92) ─────────────────────────────────────────
+  // Paperclip can deliver a wake for an issue that is already in a terminal
+  // state (deferred wake, late comment, re-delivery). Spawning a Hermes run
+  // for a done/cancelled issue wastes budget and can trigger redundant work.
+  // The wake context carries the issue status on ctx.context (the heartbeat
+  // contextSnapshot); when it is terminal, skip the run with a no-op result.
+  const wakeCtx = (ctx.context ?? {}) as {
+    issueStatus?: unknown;
+    paperclipWake?: { issue?: { status?: unknown } };
+  };
+  const wakeStatus = (
+    cfgString(wakeCtx.paperclipWake?.issue?.status) ||
+    cfgString(wakeCtx.issueStatus) ||
+    ""
+  ).toLowerCase();
+  if (wakeStatus === "done" || wakeStatus === "cancelled") {
+    await ctx.onLog(
+      "stdout",
+      `[hermes] Skipping run \u2014 issue already in terminal status "${wakeStatus}" (guard #92)\n`,
+    );
+    return {
+      exitCode: 0,
+      signal: null,
+      timedOut: false,
+      provider: resolvedProvider,
+      model,
+      summary: `Skipped: issue already "${wakeStatus}"; no Hermes run spawned (guard #92).`,
+      resultJson: { result: "", session_id: null, usage: null, cost_usd: null },
+    };
+  }
+
+
+  // ── Concurrency guard (#90) ────────────────────────────────────────────────────────────────
+  // Skip if this agent already has a Hermes run in flight. Concurrent runs
+  // serialize on Hermes session files, inflating latency and triggering
+  // Paperclip to spawn additional retries, forming a self-perpetuating
+  // retry storm (#90).
+  const agentId = ctx.agent?.id ?? null;
+  if (agentId && IN_FLIGHT_AGENTS.has(agentId)) {
+    await ctx.onLog(
+      "stdout",
+      `[hermes] Skipping run — another run is already in progress for this agent (guard #90)\n`,
+    );
+    return {
+      exitCode: 0,
+      signal: null,
+      timedOut: false,
+      provider: resolvedProvider,
+      model,
+      summary: "Skipped: another run is already in progress for this agent (guard #90).",
+      resultJson: { result: "", session_id: null, usage: null, cost_usd: null },
+    };
+  }
+  if (agentId) IN_FLIGHT_AGENTS.add(agentId);
   // ── Build prompt ───────────────────────────────────────────────────────
   const prompt = buildPrompt(ctx, config);
 
@@ -570,6 +643,13 @@ export async function execute(
     cfgString(ctx.config?.taskId);
   if (taskId) env.PAPERCLIP_TASK_ID = taskId;
 
+  // Inject PAPERCLIP_API_URL so Hermes's curl calls reach the local Paperclip
+  // instance. paperclipApiUrl has /api appended — strip it so the env var is
+  // the bare base URL that paperclipai CLI and curl workflows expect (closes #117).
+  env.PAPERCLIP_API_URL = paperclipApiUrl.replace(/\/api$/, "");
+  if (ctx.agent?.id) env.PAPERCLIP_AGENT_ID = ctx.agent.id;
+  if (ctx.agent?.companyId) env.PAPERCLIP_COMPANY_ID = ctx.agent.companyId;
+
   // Inject agent-configured env vars. Only string values are merged; an
   // unresolved secret_ref descriptor (or any non-string) is skipped and
   // surfaced as a warning rather than coerced to "[object Object]" — see
@@ -605,7 +685,9 @@ export async function execute(
   // Hermes writes non-error noise to stderr (MCP init, INFO logs, etc).
   // Paperclip renders all stderr as red/error in the UI.
   // Wrap onLog to reclassify benign stderr lines as stdout.
+  let lastHermesEmit = Date.now();
   const wrappedOnLog = async (stream: "stdout" | "stderr", chunk: string) => {
+    lastHermesEmit = Date.now();
     if (stream === "stderr") {
       const trimmed = chunk.trimEnd();
       // Benign patterns that should NOT appear as errors:
@@ -625,14 +707,34 @@ export async function execute(
     return ctx.onLog(stream, chunk);
   };
 
-  const result = await runChildProcess(ctx.runId, hermesCmd, args, {
-    cwd,
-    env,
-    timeoutSec,
-    graceSec,
-    onLog: wrappedOnLog,
-    onSpawn: ctx.onSpawn,
-  });
+  // Keepalive: a long silent synthesis (Hermes composing a final answer with no
+  // tool calls) emits no stdout, so nothing is forwarded via onLog and Paperclip's
+  // run heartbeat (lastHeartbeatAt) goes stale. Paperclip then spawns a duplicate
+  // run that steals the issue's checkout lock, and the original run's write-back
+  // fails 409 (sameRunLock) then 401 — surfacing as adapter_failed +
+  // stranded_assigned_issue. Emit a benign keepalive line whenever Hermes has been
+  // quiet for >25s; any real Hermes output resets the timer (only fills genuine
+  // gaps). Cleared when the child settles.
+  const keepAlive = setInterval(() => {
+    if (Date.now() - lastHermesEmit >= 25_000) {
+      lastHermesEmit = Date.now();
+      void ctx.onLog("stdout", "[hermes] working…\n");
+    }
+  }, 10_000);
+  let result;
+  try {
+    result = await runChildProcess(ctx.runId, hermesCmd, args, {
+      cwd,
+      env,
+      timeoutSec,
+      graceSec,
+      onLog: wrappedOnLog,
+      onSpawn: ctx.onSpawn,
+    }).finally(() => clearInterval(keepAlive));
+  } catch (err) {
+    if (agentId) IN_FLIGHT_AGENTS.delete(agentId);
+    throw err;
+  }
 
   // ── Parse output ───────────────────────────────────────────────────────
   const parsed = parseHermesOutput(result.stdout || "", result.stderr || "");
@@ -686,5 +788,55 @@ export async function execute(
     executionResult.sessionDisplayId = parsed.sessionId.slice(0, 16);
   }
 
+  // ── Post usage data back to Paperclip ─────────────────────────────────
+  // Write token usage and cost to heartbeat_runs table so Paperclip UI
+  // can display token consumption and aggregate costs per agent/company.
+  // This fixes #145 — data was extracted but never persisted.
+  if ((parsed.usage || parsed.costUsd !== undefined) && ctx.authToken) {
+    try {
+      const endpoint = `${paperclipApiUrl}/v1/heartbeat-runs/${ctx.runId}`;
+      const payload: { usageJson?: unknown; totalCostUsd?: number } = {};
+
+      if (parsed.usage) {
+        payload.usageJson = {
+          inputTokens: parsed.usage.inputTokens,
+          outputTokens: parsed.usage.outputTokens,
+        };
+      }
+
+      if (parsed.costUsd !== undefined) {
+        payload.totalCostUsd = parsed.costUsd;
+      }
+
+      // Non-blocking PATCH — don't fail the entire run if this fails
+      const response = await fetch(endpoint, {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${ctx.authToken}`,
+          "X-Paperclip-Run-Id": ctx.runId,
+        },
+        body: JSON.stringify(payload),
+      });
+
+      // Always consume the response body — undici keeps the underlying socket
+      // in CLOSE_WAIT until the body is drained, exhausting file descriptors
+      // after many heartbeats (#89).
+      const bodyText = await response.text();
+
+      if (!response.ok) {
+        // Log warning but don't throw — usage reporting is not critical to execution
+        console.warn(
+          `[hermes-adapter] Failed to post usage data to Paperclip: ${response.status} ${response.statusText}`,
+          bodyText.slice(0, 200),
+        );
+      }
+    } catch (error) {
+      // Non-fatal — log but continue
+      console.warn(`[hermes-adapter] Error posting usage data:`, error);
+    }
+  }
+
+  if (agentId) IN_FLIGHT_AGENTS.delete(agentId);
   return executionResult;
 }
