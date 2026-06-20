@@ -17,11 +17,42 @@ export const label = ADAPTER_LABEL;
 /**
  * Models available through Hermes Agent.
  *
- * Hermes supports any model via any provider. The Paperclip UI should
- * prefer detectModel() plus manual entry over curated placeholder models,
- * since Hermes availability depends on the user's local configuration.
+ * This is a curated list of popular models across multiple providers.
+ * Users can also enter any model name manually in the model field.
+ * The adapter will auto-detect the provider or use the provider field.
  */
-export const models: { id: string; label: string }[] = [];
+export const models: { id: string; label: string }[] = [
+  // Anthropic (via anthropic provider)
+  { id: "anthropic/claude-sonnet-4", label: "Claude Sonnet 4 (Anthropic)" },
+  { id: "anthropic/claude-opus-4", label: "Claude Opus 4 (Anthropic)" },
+  { id: "anthropic/claude-3.7-sonnet", label: "Claude 3.7 Sonnet (Anthropic)" },
+
+  // OpenAI (via openai-codex / copilot)
+  { id: "gpt-5.4", label: "GPT-5.4 (GitHub Copilot)" },
+  { id: "o1", label: "O1 (OpenAI)" },
+  { id: "o3-mini", label: "O3-mini (OpenAI)" },
+  { id: "gpt-4.5-turbo", label: "GPT-4.5 Turbo (OpenAI)" },
+
+  // OpenCode.go
+  { id: "grok-3-turbo", label: "Grok 3 Turbo (xAI via OpenCode)" },
+  { id: "gptdoc-5.4-vision", label: "GPTDoc 5.4 Vision (OpenCode)" },
+
+  // Nous Research
+  { id: "hermes-4", label: "Hermes 4 (Nous via OpenRouter)" },
+
+  // Google Gemini (auto-routed)
+  { id: "gemini-3.5-pro", label: "Gemini 3.5 Pro" },
+  { id: "gemini-flash-3.5", label: "Gemini Flash 3.5" },
+
+  // DeepSeek (auto-routed)
+  { id: "deepseek-v3", label: "DeepSeek V3" },
+
+  // Z.AI / GLM
+  { id: "glm-5-turbo", label: "GLM-5 Turbo (Z.AI)" },
+
+  // Meta Llama (auto-routed)
+  { id: "llama-3.4-405b", label: "Llama 3.4 405B" },
+];
 
 /**
  * Documentation shown in the Paperclip UI when configuring a Hermes agent.

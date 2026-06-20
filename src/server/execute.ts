@@ -36,7 +36,6 @@ import {
   DEFAULT_TIMEOUT_SEC,
   DEFAULT_GRACE_SEC,
   DEFAULT_MODEL,
-  VALID_PROVIDERS,
 } from "../shared/constants.js";
 
 import {
@@ -71,6 +70,15 @@ const DEFAULT_PROMPT_TEMPLATE = `You are "{{agentName}}", an AI agent employee i
 
 IMPORTANT: Use \`terminal\` tool with \`curl\` for ALL Paperclip API calls (web_extract and browser cannot access localhost).
 
+## Paperclip API authentication
+
+Paperclip injects the credentials you need into the Hermes process environment:
+  - PAPERCLIP_API_KEY: bearer token for Paperclip API calls
+  - PAPERCLIP_RUN_ID: current heartbeat/run id for audit logging
+
+Every Paperclip API curl MUST include both headers:
+  \`-H "Authorization: Bearer $PAPERCLIP_API_KEY" -H "X-Paperclip-Run-Id: $PAPERCLIP_RUN_ID"\`
+
 Your Paperclip identity:
   Agent ID: {{agentId}}
   Company ID: {{companyId}}
@@ -88,18 +96,18 @@ Title: {{taskTitle}}
 
 1. Work on the task using your tools
 2. When done, mark the issue as completed:
-   \`curl -s -X PATCH -H "Authorization: Bearer $PAPERCLIP_API_KEY" "{{paperclipApiUrl}}/issues/{{taskId}}" -H "Content-Type: application/json" -d '{"status":"done"}'\`
+   \`curl -s -X PATCH -H "Authorization: Bearer $PAPERCLIP_API_KEY" -H "X-Paperclip-Run-Id: $PAPERCLIP_RUN_ID" "{{paperclipApiUrl}}/issues/{{taskId}}" -H "Content-Type: application/json" -d '{"status":"done"}'\`
 3. Post a completion comment on the issue summarizing what you did:
-   \`curl -s -X POST -H "Authorization: Bearer $PAPERCLIP_API_KEY" "{{paperclipApiUrl}}/issues/{{taskId}}/comments" -H "Content-Type: application/json" -d '{"body":"DONE: <your summary here>"}'\`
+   \`curl -s -X POST -H "Authorization: Bearer $PAPERCLIP_API_KEY" -H "X-Paperclip-Run-Id: $PAPERCLIP_RUN_ID" "{{paperclipApiUrl}}/issues/{{taskId}}/comments" -H "Content-Type: application/json" -d '{"body":"DONE: <your summary here>"}'\`
 4. If this issue has a parent (check the issue body or comments for references like TRA-XX), post a brief notification on the parent issue so the parent owner knows:
-   \`curl -s -X POST -H "Authorization: Bearer $PAPERCLIP_API_KEY" "{{paperclipApiUrl}}/issues/PARENT_ISSUE_ID/comments" -H "Content-Type: application/json" -d '{"body":"{{agentName}} completed {{taskId}}. Summary: <brief>"}'\`
+   \`curl -s -X POST -H "Authorization: Bearer $PAPERCLIP_API_KEY" -H "X-Paperclip-Run-Id: $PAPERCLIP_RUN_ID" "{{paperclipApiUrl}}/issues/PARENT_ISSUE_ID/comments" -H "Content-Type: application/json" -d '{"body":"{{agentName}} completed {{taskId}}. Summary: <brief>"}'\`
 {{/taskId}}
 
 {{#commentId}}
 ## Comment on This Issue
 
 Someone commented. Read it:
-   \`curl -s -H "Authorization: Bearer $PAPERCLIP_API_KEY" "{{paperclipApiUrl}}/issues/{{taskId}}/comments/{{commentId}}" | python3 -m json.tool\`
+   \`curl -s -H "Authorization: Bearer $PAPERCLIP_API_KEY" -H "X-Paperclip-Run-Id: $PAPERCLIP_RUN_ID" "{{paperclipApiUrl}}/issues/{{taskId}}/comments/{{commentId}}" | python3 -m json.tool\`
 
 Address the comment, POST a reply if needed, then continue working.
 {{/commentId}}
@@ -108,17 +116,17 @@ Address the comment, POST a reply if needed, then continue working.
 ## Heartbeat Wake — Check for Work
 
 1. List ALL open issues assigned to you (todo, backlog, in_progress):
-   \`curl -s -H "Authorization: Bearer $PAPERCLIP_API_KEY" "{{paperclipApiUrl}}/companies/{{companyId}}/issues?assigneeAgentId={{agentId}}" | python3 -c "import sys,json;issues=json.loads(sys.stdin.read());[print(f'{i[\"identifier\"]} {i[\"status\"]:>12} {i[\"priority\"]:>6} {i[\"title\"]}') for i in issues if i['status'] not in ('done','cancelled')]" \`
+   \`curl -s -H "Authorization: Bearer $PAPERCLIP_API_KEY" -H "X-Paperclip-Run-Id: $PAPERCLIP_RUN_ID" "{{paperclipApiUrl}}/companies/{{companyId}}/issues?assigneeAgentId={{agentId}}" | python3 -c "import sys,json;issues=json.loads(sys.stdin.read());[print(f'{i[\"identifier\"]} {i[\"status\"]:>12} {i[\"priority\"]:>6} {i[\"title\"]}') for i in issues if i['status'] not in ('done','cancelled')]" \`
 
 2. If issues found, pick the highest priority one that is not done/cancelled and work on it:
-   - Read the issue details: \`curl -s -H "Authorization: Bearer $PAPERCLIP_API_KEY" "{{paperclipApiUrl}}/issues/ISSUE_ID"\`
+   - Read the issue details: \`curl -s -H "Authorization: Bearer $PAPERCLIP_API_KEY" -H "X-Paperclip-Run-Id: $PAPERCLIP_RUN_ID" "{{paperclipApiUrl}}/issues/ISSUE_ID"\`
    - Do the work in the project directory: {{projectName}}
    - When done, mark complete and post a comment (see Workflow steps 2-4 above)
 
 3. If no issues assigned to you, check for unassigned issues:
-   \`curl -s -H "Authorization: Bearer $PAPERCLIP_API_KEY" "{{paperclipApiUrl}}/companies/{{companyId}}/issues?status=backlog" | python3 -c "import sys,json;issues=json.loads(sys.stdin.read());[print(f'{i[\"identifier\"]} {i[\"title\"]}') for i in issues if not i.get('assigneeAgentId')]" \`
+   \`curl -s -H "Authorization: Bearer $PAPERCLIP_API_KEY" -H "X-Paperclip-Run-Id: $PAPERCLIP_RUN_ID" "{{paperclipApiUrl}}/companies/{{companyId}}/issues?status=backlog" | python3 -c "import sys,json;issues=json.loads(sys.stdin.read());[print(f'{i[\"identifier\"]} {i[\"title\"]}') for i in issues if not i.get('assigneeAgentId')]" \`
    If you find a relevant issue, assign it to yourself:
-   \`curl -s -X PATCH -H "Authorization: Bearer $PAPERCLIP_API_KEY" "{{paperclipApiUrl}}/issues/ISSUE_ID" -H "Content-Type: application/json" -d '{"assigneeAgentId":"{{agentId}}","status":"todo"}'\`
+   \`curl -s -X PATCH -H "Authorization: Bearer $PAPERCLIP_API_KEY" -H "X-Paperclip-Run-Id: $PAPERCLIP_RUN_ID" "{{paperclipApiUrl}}/issues/ISSUE_ID" -H "Content-Type: application/json" -d '{"assigneeAgentId":"{{agentId}}","status":"todo"}'\`
 
 4. If truly nothing to do, report briefly what you checked.
 {{/noTask}}`;
@@ -129,14 +137,61 @@ function buildPrompt(
 ): string {
   const template = cfgString(config.promptTemplate) || DEFAULT_PROMPT_TEMPLATE;
 
-  const taskId = cfgString(ctx.config?.taskId);
-  const taskTitle = cfgString(ctx.config?.taskTitle) || "";
-  const taskBody = cfgString(ctx.config?.taskBody) || "";
-  const commentId = cfgString(ctx.config?.commentId) || "";
-  const wakeReason = cfgString(ctx.config?.wakeReason) || "";
+  // Paperclip places wake context on ctx.context (the contextSnapshot), not on
+  // ctx.config (the resolved runtimeConfig: workspace + skills + env). Read task
+  // fields from ctx.context, with fallbacks to paperclipIssue / paperclipWake.issue
+  // (current Paperclip nests them there; the flat fields exist on older builds) and
+  // ctx.config last for backward-compat. Fixes #68.
+  const wakeCtx = (ctx.context ?? {}) as {
+    taskId?: unknown;
+    issueId?: unknown;
+    taskTitle?: unknown;
+    taskBody?: unknown;
+    commentId?: unknown;
+    wakeCommentId?: unknown;
+    wakeReason?: unknown;
+    companyName?: unknown;
+    projectName?: unknown;
+    paperclipTaskMarkdown?: unknown;
+    paperclipIssue?: { id?: unknown; title?: unknown; description?: unknown };
+    paperclipWake?: { reason?: unknown; issue?: { id?: unknown; title?: unknown } };
+  };
+  const wakeIssue = wakeCtx.paperclipWake?.issue ?? {};
+  const ctxIssue = wakeCtx.paperclipIssue ?? {};
+
+  const taskId =
+    cfgString(wakeCtx.taskId) ||
+    cfgString(wakeCtx.issueId) ||
+    cfgString(wakeIssue.id) ||
+    cfgString(ctxIssue.id) ||
+    cfgString(ctx.config?.taskId);
+  const taskTitle =
+    cfgString(ctxIssue.title) ||
+    cfgString(wakeIssue.title) ||
+    cfgString(wakeCtx.taskTitle) ||
+    cfgString(ctx.config?.taskTitle) ||
+    "";
+  const taskBody =
+    cfgString(ctxIssue.description) ||
+    cfgString(wakeCtx.paperclipTaskMarkdown) ||
+    cfgString(wakeCtx.taskBody) ||
+    cfgString(ctx.config?.taskBody) ||
+    "";
+  const commentId =
+    cfgString(wakeCtx.commentId) ||
+    cfgString(wakeCtx.wakeCommentId) ||
+    cfgString(ctx.config?.commentId) ||
+    "";
+  const wakeReason =
+    cfgString(wakeCtx.wakeReason) ||
+    cfgString(wakeCtx.paperclipWake?.reason) ||
+    cfgString(ctx.config?.wakeReason) ||
+    "";
   const agentName = ctx.agent?.name || "Hermes Agent";
-  const companyName = cfgString(ctx.config?.companyName) || "";
-  const projectName = cfgString(ctx.config?.projectName) || "";
+  const companyName =
+    cfgString(wakeCtx.companyName) || cfgString(ctx.config?.companyName) || "";
+  const projectName =
+    cfgString(wakeCtx.projectName) || cfgString(ctx.config?.projectName) || "";
 
   // Build API URL — ensure it has the /api path
   let paperclipApiUrl =
@@ -198,6 +253,66 @@ const SESSION_ID_REGEX = /^session_id:\s*(\S+)/m;
 /** Regex for legacy session output format */
 const SESSION_ID_REGEX_LEGACY = /session[_ ](?:id|saved)[:\s]+([a-zA-Z0-9_-]+)/i;
 
+/**
+ * Shape of a real Hermes session ID, e.g. "20260609_153047_5568c8"
+ * (YYYYMMDD_HHMMSS_<suffix>).
+ *
+ * This guard exists because the loose legacy regex above also matches prose
+ * such as Hermes' own error message "Use a session ID from a previous CLI
+ * run", capturing the word "from" as a session ID. That bogus value was then
+ * persisted and replayed as `hermes --resume from`, which fails with
+ * "Session not found: from" — printing the same message again, re-capturing
+ * "from", and stranding the run in a permanent recovery loop. Validating
+ * captured/stored IDs against this shape both prevents the bad capture and
+ * lets an already-poisoned agent self-heal by starting a fresh session.
+ */
+const SESSION_ID_SHAPE = /^\d{8}_\d{6}_[0-9a-z]+$/i;
+export function isValidSessionId(id: unknown): id is string {
+  return typeof id === "string" && SESSION_ID_SHAPE.test(id);
+}
+
+/**
+ * Sanitize the agent-configured `env` map before it is merged into the child
+ * process environment.
+ *
+ * The Paperclip server is expected to resolve `secret_ref` bindings into plain
+ * strings before invoking the adapter (see test.ts). This is a defensive guard
+ * for when that has not happened: a bare `Object.assign` of an unresolved
+ * `secret_ref` descriptor object would coerce to the literal string
+ * "[object Object]" when the child is spawned, silently replacing the
+ * credential and breaking any agent (notably delegated sub-agents) whose task
+ * depends on that secret. Only string values are kept; anything else is
+ * reported as a warning so the problem is visible instead of corrupting the env.
+ */
+export function sanitizeUserEnv(userEnv: unknown): {
+  env: Record<string, string>;
+  warnings: string[];
+} {
+  const env: Record<string, string> = {};
+  const warnings: string[] = [];
+  if (userEnv && typeof userEnv === "object") {
+    for (const [key, value] of Object.entries(userEnv as Record<string, unknown>)) {
+      if (typeof value === "string") {
+        env[key] = value;
+      } else if (
+        value !== null &&
+        typeof value === "object" &&
+        (value as { type?: unknown }).type === "secret_ref"
+      ) {
+        warnings.push(
+          `env var ${key} is an unresolved secret_ref and was skipped (the server is expected to resolve it to a string). Running without it instead of injecting "[object Object]".`,
+        );
+      } else if (value !== null && value !== undefined) {
+        warnings.push(
+          `env var ${key} has a non-string value (${typeof value}) and was skipped to avoid coercion to "[object Object]".`,
+        );
+      }
+    }
+  }
+  return { env, warnings };
+}
+
+
 /** Regex to extract token usage from Hermes output. */
 const TOKEN_USAGE_REGEX =
   /tokens?[:\s]+(\d+)\s*(?:input|in)\b.*?(\d+)\s*(?:output|out)\b/i;
@@ -246,7 +361,7 @@ function cleanResponse(raw: string): string {
 // Output parsing
 // ---------------------------------------------------------------------------
 
-function parseHermesOutput(stdout: string, stderr: string): ParsedOutput {
+export function parseHermesOutput(stdout: string, stderr: string): ParsedOutput {
   const combined = stdout + "\n" + stderr;
   const result: ParsedOutput = {};
 
@@ -263,10 +378,12 @@ function parseHermesOutput(stdout: string, stderr: string): ParsedOutput {
       result.response = cleanResponse(stdout.slice(0, sessionLineIdx));
     }
   } else {
-    // Legacy format (non-quiet mode)
+    // Legacy format (non-quiet mode). The legacy regex is run against
+    // stdout+stderr, so it can match prose in error output — only accept a
+    // capture that actually looks like a session ID (see SESSION_ID_SHAPE).
     const legacyMatch = combined.match(SESSION_ID_REGEX_LEGACY);
-    if (legacyMatch?.[1]) {
-      result.sessionId = legacyMatch?.[1] ?? null;
+    if (isValidSessionId(legacyMatch?.[1])) {
+      result.sessionId = legacyMatch[1];
     }
     // In non-quiet mode, extract clean response from stdout by
     // filtering out tool lines, system messages, and noise
@@ -316,7 +433,6 @@ export async function execute(
 
   // ── Resolve configuration ──────────────────────────────────────────────
   const hermesCmd = cfgString(config.hermesCommand) || HERMES_CLI;
-  const model = cfgString(config.model) || DEFAULT_MODEL;
   const timeoutSec = cfgNumber(config.timeoutSec) || DEFAULT_TIMEOUT_SEC;
   const graceSec = cfgNumber(config.graceSec) || DEFAULT_GRACE_SEC;
   const maxTurns = cfgNumber(config.maxTurnsPerRun);
@@ -326,26 +442,28 @@ export async function execute(
   const worktreeMode = cfgBoolean(config.worktreeMode) === true;
   const checkpoints = cfgBoolean(config.checkpoints) === true;
 
+  // ── Detect Hermes config early ────────────────────────────────────────
+  // Read ~/.hermes/config.yaml before resolving model/provider so we can
+  // use the Hermes default model as a fallback if no model is specified
+  // in adapterConfig. This fixes the issue where DEFAULT_MODEL
+  // (anthropic/claude-sonnet-4) would override a user's configured model.
+  let detectedConfig: Awaited<ReturnType<typeof detectModel>> | null = null;
+  try {
+    detectedConfig = await detectModel();
+  } catch {
+    // Non-fatal — detection failure shouldn't block execution
+  }
+
+  // Resolve model: adapterConfig > Hermes config > DEFAULT_MODEL
+  const model = cfgString(config.model) || detectedConfig?.model || DEFAULT_MODEL;
+
   // ── Resolve provider (defense in depth) ────────────────────────────────
   // Priority chain:
   //   1. Explicit provider in adapterConfig (user override)
-  //   2. Provider from ~/.hermes/config.yaml (detected at runtime)
+  //   2. Provider from ~/.hermes/config.yaml (already detected above)
   //   3. Provider inferred from model name prefix
   //   4. "auto" (let Hermes decide)
-  //
-  // This ensures that even if the agent was created before provider tracking
-  // was added, or if the model was changed without updating provider, the
-  // correct provider is still used.
-  let detectedConfig: Awaited<ReturnType<typeof detectModel>> | null = null;
   const explicitProvider = cfgString(config.provider);
-
-  if (!explicitProvider) {
-    try {
-      detectedConfig = await detectModel();
-    } catch {
-      // Non-fatal — detection failure shouldn't block execution
-    }
-  }
 
   const { provider: resolvedProvider, resolvedFrom } = resolveProvider({
     explicitProvider,
@@ -396,12 +514,21 @@ export async function execute(
   // system is designed for human-attended interactive sessions.
   args.push("--yolo");
 
-  // Session resume
+  // Session resume. Only resume from a value that looks like a real session
+  // ID — this guards against a previously-persisted bogus value (e.g. "from",
+  // captured from error prose) being replayed as `--resume from`, which would
+  // fail every retry with "Session not found" and strand the run. A
+  // non-conforming stored ID is dropped so the run starts a fresh session.
   const prevSessionId = cfgString(
     (ctx.runtime?.sessionParams as Record<string, unknown> | null)?.sessionId,
   );
-  if (persistSession && prevSessionId) {
+  if (persistSession && isValidSessionId(prevSessionId)) {
     args.push("--resume", prevSessionId);
+  } else if (persistSession && prevSessionId) {
+    await ctx.onLog(
+      "stderr",
+      `[hermes] WARNING: ignoring malformed stored session id "${prevSessionId}"; starting a fresh session.\n`,
+    );
   }
 
   if (extraArgs?.length) {
@@ -414,15 +541,43 @@ export async function execute(
     ...buildPaperclipEnv(ctx.agent),
   };
 
+  // Paperclip may be launched from an interactive Hermes shell during local
+  // development. Do not let those parent-session markers leak into the
+  // managed child process; heartbeat agents are non-interactive and should use
+  // their own fresh session metadata.
+  delete env.HERMES_INTERACTIVE;
+  delete env.HERMES_SESSION_ID;
+  delete env.HERMES_GATEWAY_SESSION;
+
   if (ctx.runId) env.PAPERCLIP_RUN_ID = ctx.runId;
-  if ((ctx as any).authToken && !env.PAPERCLIP_API_KEY)
-    env.PAPERCLIP_API_KEY = (ctx as any).authToken;
-  const taskId = cfgString(ctx.config?.taskId);
+  // ctx.authToken is the short-lived agent JWT issued by Paperclip for this run.
+  // Always override PAPERCLIP_API_KEY with it so Hermes uses the agent's identity
+  // when making API calls — not a server-level key from the parent environment.
+  // Without this, Paperclip attributes comments to "local-board" instead of the
+  // agent (upstream issues #53 and #93).
+  if (ctx.authToken) env.PAPERCLIP_API_KEY = ctx.authToken;
+  const taskCtx = (ctx.context ?? {}) as {
+    taskId?: unknown;
+    issueId?: unknown;
+    paperclipWake?: { issue?: { id?: unknown } };
+    paperclipIssue?: { id?: unknown };
+  };
+  const taskId =
+    cfgString(taskCtx.taskId) ||
+    cfgString(taskCtx.issueId) ||
+    cfgString(taskCtx.paperclipWake?.issue?.id) ||
+    cfgString(taskCtx.paperclipIssue?.id) ||
+    cfgString(ctx.config?.taskId);
   if (taskId) env.PAPERCLIP_TASK_ID = taskId;
 
-  const userEnv = config.env as Record<string, string> | undefined;
-  if (userEnv && typeof userEnv === "object") {
-    Object.assign(env, userEnv);
+  // Inject agent-configured env vars. Only string values are merged; an
+  // unresolved secret_ref descriptor (or any non-string) is skipped and
+  // surfaced as a warning rather than coerced to "[object Object]" — see
+  // sanitizeUserEnv() for the full rationale.
+  const { env: userEnv, warnings: envWarnings } = sanitizeUserEnv(config.env);
+  Object.assign(env, userEnv);
+  for (const warning of envWarnings) {
+    await ctx.onLog("stderr", `[hermes] WARNING: ${warning}\n`);
   }
 
   // ── Resolve working directory ──────────────────────────────────────────
@@ -476,6 +631,7 @@ export async function execute(
     timeoutSec,
     graceSec,
     onLog: wrappedOnLog,
+    onSpawn: ctx.onSpawn,
   });
 
   // ── Parse output ───────────────────────────────────────────────────────
@@ -523,8 +679,9 @@ export async function execute(
     cost_usd: parsed.costUsd ?? null,
   };
 
-  // Store session ID for next run
-  if (persistSession && parsed.sessionId) {
+  // Store session ID for next run — only persist a well-formed ID so a bad
+  // capture can never be saved and replayed on the next `--resume`.
+  if (persistSession && isValidSessionId(parsed.sessionId)) {
     executionResult.sessionParams = { sessionId: parsed.sessionId };
     executionResult.sessionDisplayId = parsed.sessionId.slice(0, 16);
   }

@@ -140,18 +140,25 @@ export function resolveProvider(options: {
 }): { provider: string; resolvedFrom: string } {
   const { explicitProvider, detectedProvider, detectedModel, model } = options;
 
-  // 1. Explicit provider from adapterConfig — user override, always wins
-  if (explicitProvider && (VALID_PROVIDERS as readonly string[]).includes(explicitProvider)) {
+  // 1. Explicit provider from adapterConfig — user override, always wins.
+  //    Accept any non-empty string; the Hermes CLI validates providers at
+  //    runtime and will reject unknown values with a clear error message.
+  //    Guarding against VALID_PROVIDERS here blocks custom/plugin providers
+  //    (ollama-launch, opencode-go, litellm, etc.) that are not in the list.
+  if (explicitProvider) {
     return { provider: explicitProvider, resolvedFrom: "adapterConfig" };
   }
 
   // 2. Provider from Hermes config file — but ONLY if the config model matches
   //    the requested model. Otherwise the config provider is for a different model
   //    and would cause exactly the kind of routing bug we're fixing.
+  //
+  //    We trust ANY provider from Hermes config unconditionally — no validation
+  //    against VALID_PROVIDERS. This allows plugin providers (ollama-launch,
+  //    opencode-go) and future providers not in the hardcoded list to work.
   if (
     detectedProvider &&
     detectedModel &&
-    (VALID_PROVIDERS as readonly string[]).includes(detectedProvider) &&
     // Config model matches requested model (exact or case-insensitive)
     detectedModel.toLowerCase() === model?.toLowerCase()
   ) {
