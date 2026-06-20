@@ -36,7 +36,6 @@ import {
   DEFAULT_TIMEOUT_SEC,
   DEFAULT_GRACE_SEC,
   DEFAULT_MODEL,
-  VALID_PROVIDERS,
 } from "../shared/constants.js";
 
 import {
@@ -551,8 +550,12 @@ export async function execute(
   delete env.HERMES_GATEWAY_SESSION;
 
   if (ctx.runId) env.PAPERCLIP_RUN_ID = ctx.runId;
-  if ((ctx as any).authToken && !env.PAPERCLIP_API_KEY)
-    env.PAPERCLIP_API_KEY = (ctx as any).authToken;
+  // ctx.authToken is the short-lived agent JWT issued by Paperclip for this run.
+  // Always override PAPERCLIP_API_KEY with it so Hermes uses the agent's identity
+  // when making API calls — not a server-level key from the parent environment.
+  // Without this, Paperclip attributes comments to "local-board" instead of the
+  // agent (upstream issues #53 and #93).
+  if (ctx.authToken) env.PAPERCLIP_API_KEY = ctx.authToken;
   const taskCtx = (ctx.context ?? {}) as {
     taskId?: unknown;
     issueId?: unknown;

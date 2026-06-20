@@ -140,8 +140,12 @@ export function resolveProvider(options: {
 }): { provider: string; resolvedFrom: string } {
   const { explicitProvider, detectedProvider, detectedModel, model } = options;
 
-  // 1. Explicit provider from adapterConfig — user override, always wins
-  if (explicitProvider && (VALID_PROVIDERS as readonly string[]).includes(explicitProvider)) {
+  // 1. Explicit provider from adapterConfig — user override, always wins.
+  //    Accept any non-empty string; the Hermes CLI validates providers at
+  //    runtime and will reject unknown values with a clear error message.
+  //    Guarding against VALID_PROVIDERS here blocks custom/plugin providers
+  //    (ollama-launch, opencode-go, litellm, etc.) that are not in the list.
+  if (explicitProvider) {
     return { provider: explicitProvider, resolvedFrom: "adapterConfig" };
   }
 
