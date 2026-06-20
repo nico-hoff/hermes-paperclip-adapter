@@ -10,8 +10,8 @@ import type {
 
 import { ADAPTER_TYPE, ADAPTER_LABEL } from "../shared/constants.js";
 
-export { execute } from "./execute.js";
-export { testEnvironment } from "./test.js";
+export { execute, loadPersonaFile, buildToolTranscriptFallback } from "./execute.js";
+export { testEnvironment, getHermesPython } from "./test.js";
 export { detectModel, parseModelFromConfig, resolveProvider, inferProviderFromModel } from "./detect-model.js";
 export {
   listHermesSkills as listSkills,
@@ -76,6 +76,11 @@ export function createServerAdapter(): ServerAdapterModule {
     listSkills,
     syncSkills,
     sessionCodec,
+    // Tell Paperclip to inject the agent's AGENTS.md / SOUL.md bundle path
+    // into config.instructionsFilePath before calling execute() (#124).
+    supportsInstructionsBundle: true,
+    // Tell Paperclip to materialize runtime skills to disk before execute() (#162).
+    requiresMaterializedRuntimeSkills: true,
     models: [] as AdapterModel[],
     agentConfigurationDoc: `# ${ADAPTER_LABEL} Configuration
 

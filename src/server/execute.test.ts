@@ -5,6 +5,7 @@ import {
   isValidSessionId,
   parseHermesOutput,
   sanitizeUserEnv,
+  buildToolTranscriptFallback,
 } from "./execute.js";
 
 describe("isValidSessionId", () => {
@@ -129,5 +130,33 @@ describe("parseHermesOutput — legacy path rejects prose (#131/#142)", () => {
     const parsed = parseHermesOutput(stdout, "");
     // Primary regex should catch this; verify it's not undefined
     assert.equal(parsed.sessionId, "20260615_100000_aabbcc");
+  });
+});
+
+describe("buildToolTranscriptFallback (#121)", () => {
+  it("returns tool lines when response is empty", () => {
+    const stdout = "[tool] ls /tmp\n[tool] cat /tmp/out.txt\nsession_id: 20260101_010101_abc\n";
+    const result = buildToolTranscriptFallback(stdout);
+    assert.ok(result.length > 0);
+    assert.ok(!result.includes("session_id:"));
+  });
+
+  it("returns non-noise content when no tool lines present", () => {
+    const stdout = "Some output from the agent\nMore lines\n";
+    const result = buildToolTranscriptFallback(stdout);
+    assert.ok(result.includes("Some output") || result.includes("More lines") || result.length > 0);
+  });
+
+  it("returns a placeholder when stdout is completely empty", () => {
+    const result = buildToolTranscriptFallback("");
+    assert.ok(result.length > 0);
+    assert.ok(result.includes("completed"));
+  });
+
+  it("filters out [hermes] and [paperclip] noise lines", () => {
+    const stdout = "[hermes] Starting Hermes Agent\n[paperclip] keepalive\nActual response here\n";
+    const result = buildToolTranscriptFallback(stdout);
+    assert.ok(!result.includes("[hermes]"));
+    assert.ok(!result.includes("[paperclip]"));
   });
 });

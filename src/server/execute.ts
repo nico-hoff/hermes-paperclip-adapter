@@ -18,6 +18,9 @@
  *   --source           session source tag for filtering
  */
 
+import { readFile, readdir, stat } from "node:fs/promises";
+import path from "node:path";
+
 import type {
   AdapterExecutionContext,
   AdapterExecutionResult,
@@ -66,7 +69,11 @@ function cfgStringArray(v: unknown): string[] | undefined {
 // Wake-up prompt builder
 // ---------------------------------------------------------------------------
 
-const DEFAULT_PROMPT_TEMPLATE = `You are "{{agentName}}", an AI agent employee in a Paperclip-managed company.
+const DEFAULT_PROMPT_TEMPLATE = `{{#personaContent}}{{personaContent}}
+
+---
+
+{{/personaContent}}You are "{{agentName}}", an AI agent employee in a Paperclip-managed company.
 
 IMPORTANT: Use \`terminal\` tool with \`curl\` for ALL Paperclip API calls (web_extract and browser cannot access localhost).
 
@@ -99,17 +106,23 @@ Title: {{taskTitle}}
    \`curl -s -X PATCH -H "Authorization: Bearer $PAPERCLIP_API_KEY" -H "X-Paperclip-Run-Id: $PAPERCLIP_RUN_ID" "{{paperclipApiUrl}}/issues/{{taskId}}" -H "Content-Type: application/json" -d '{"status":"done"}'\`
 3. Post a completion comment on the issue summarizing what you did:
    \`curl -s -X POST -H "Authorization: Bearer $PAPERCLIP_API_KEY" -H "X-Paperclip-Run-Id: $PAPERCLIP_RUN_ID" "{{paperclipApiUrl}}/issues/{{taskId}}/comments" -H "Content-Type: application/json" -d '{"body":"DONE: <your summary here>"}'\`
-4. If this issue has a parent (check the issue body or comments for references like TRA-XX), post a brief notification on the parent issue so the parent owner knows:
+4. If you produced any output files (reports, code, data files), save them into the \`artifacts/\` directory in your working directory so they are automatically uploaded to Paperclip as run artifacts.
+5. If this issue has a parent (check the issue body or comments for references like TRA-XX), post a brief notification on the parent issue so the parent owner knows:
    \`curl -s -X POST -H "Authorization: Bearer $PAPERCLIP_API_KEY" -H "X-Paperclip-Run-Id: $PAPERCLIP_RUN_ID" "{{paperclipApiUrl}}/issues/PARENT_ISSUE_ID/comments" -H "Content-Type: application/json" -d '{"body":"{{agentName}} completed {{taskId}}. Summary: <brief>"}'\`
 {{/taskId}}
 
 {{#commentId}}
 ## Comment on This Issue
 
-Someone commented. Read it:
+Someone commented on your task.
+
+{{#latestCommentBody}}Comment content:
+> {{latestCommentBody}}
+
+{{/latestCommentBody}}{{^latestCommentBody}}Fetch the full comment:
    \`curl -s -H "Authorization: Bearer $PAPERCLIP_API_KEY" -H "X-Paperclip-Run-Id: $PAPERCLIP_RUN_ID" "{{paperclipApiUrl}}/issues/{{taskId}}/comments/{{commentId}}" | python3 -m json.tool\`
 
-Address the comment, POST a reply if needed, then continue working.
+{{/latestCommentBody}}Address the comment, POST a reply if needed, then continue working.
 {{/commentId}}
 
 {{#noTask}}
@@ -134,6 +147,7 @@ Address the comment, POST a reply if needed, then continue working.
 function buildPrompt(
   ctx: AdapterExecutionContext,
   config: Record<string, unknown>,
+  personaContent: string,
 ): string {
   const template = cfgString(config.promptTemplate) || DEFAULT_PROMPT_TEMPLATE;
 
@@ -153,8 +167,10 @@ function buildPrompt(
     companyName?: unknown;
     projectName?: unknown;
     paperclipTaskMarkdown?: unknown;
+    latestCommentBody?: unknown;
+    wakeCommentBody?: unknown;
     paperclipIssue?: { id?: unknown; title?: unknown; description?: unknown };
-    paperclipWake?: { reason?: unknown; issue?: { id?: unknown; title?: unknown } };
+    paperclipWake?: { reason?: unknown; issue?: { id?: unknown; title?: unknown }; commentBody?: unknown };
   };
   const wakeIssue = wakeCtx.paperclipWake?.issue ?? {};
   const ctxIssue = wakeCtx.paperclipIssue ?? {};
@@ -181,6 +197,13 @@ function buildPrompt(
     cfgString(wakeCtx.commentId) ||
     cfgString(wakeCtx.wakeCommentId) ||
     cfgString(ctx.config?.commentId) ||
+    "";
+  // latestCommentBody: the body text of the wake-triggering comment (#130)
+  const latestCommentBody =
+    cfgString(wakeCtx.latestCommentBody) ||
+    cfgString(wakeCtx.wakeCommentBody) ||
+    cfgString(wakeCtx.paperclipWake?.commentBody) ||
+    cfgString(ctx.config?.latestCommentBody) ||
     "";
   const wakeReason =
     cfgString(wakeCtx.wakeReason) ||
@@ -213,13 +236,21 @@ function buildPrompt(
     taskTitle,
     taskBody,
     commentId,
+    latestCommentBody,
     wakeReason,
     projectName,
     paperclipApiUrl,
+    personaContent,
   };
 
-  // Handle conditional sections: {{#key}}...{{/key}}
+  // Handle conditional sections: {{#key}}...{{/key}} and {{^key}}...{{/key}}
   let rendered = template;
+
+  // {{#personaContent}}...{{/personaContent}} — include if persona loaded
+  rendered = rendered.replace(
+    /\{\{#personaContent\}\}([\s\S]*?)\{\{\/personaContent\}\}/g,
+    personaContent ? "$1" : "",
+  );
 
   // {{#taskId}}...{{/taskId}} — include if task is assigned
   rendered = rendered.replace(
@@ -237,6 +268,18 @@ function buildPrompt(
   rendered = rendered.replace(
     /\{\{#commentId\}\}([\s\S]*?)\{\{\/commentId\}\}/g,
     commentId ? "$1" : "",
+  );
+
+  // {{#latestCommentBody}}...{{/latestCommentBody}} — include if body available
+  rendered = rendered.replace(
+    /\{\{#latestCommentBody\}\}([\s\S]*?)\{\{\/latestCommentBody\}\}/g,
+    latestCommentBody ? "$1" : "",
+  );
+
+  // {{^latestCommentBody}}...{{/latestCommentBody}} — include if body NOT available
+  rendered = rendered.replace(
+    /\{\{\^latestCommentBody\}\}([\s\S]*?)\{\{\/latestCommentBody\}\}/g,
+    latestCommentBody ? "" : "$1",
   );
 
   // Replace remaining {{variable}} placeholders
@@ -421,6 +464,138 @@ export function parseHermesOutput(stdout: string, stderr: string): ParsedOutput 
 }
 
 // ---------------------------------------------------------------------------
+// Tool-transcript fallback (#121)
+// ---------------------------------------------------------------------------
+
+/**
+ * When Hermes produces no final text response (silent completion), construct a
+ * minimal summary from the tool-call lines in stdout so the run viewer shows
+ * something meaningful instead of an empty transcript entry.
+ */
+export function buildToolTranscriptFallback(stdout: string): string {
+  const lines = stdout.split("\n").filter(Boolean);
+
+  // Collect the last few meaningful non-noise lines for a terse summary
+  const toolLines = lines
+    .filter((l) => l.includes("[tool]") || /^╊/.test(l)) // ┊ prefix
+    .map((l) => l.replace(/^╊\s*/, "").replace(/^\[tool\]\s*/, "").trim())
+    .filter(Boolean)
+    .slice(-5);
+
+  if (toolLines.length > 0) {
+    return `Run completed (tools used):\n${toolLines.join("\n")}`;
+  }
+
+  // Check for any non-noise stdout content
+  const contentLines = lines.filter(
+    (l) =>
+      !l.startsWith("[hermes]") &&
+      !l.startsWith("[tool]") &&
+      !l.startsWith("[paperclip]") &&
+      !l.match(/^\[\d{4}-\d{2}-\d{2}/) &&
+      !l.startsWith("session_id:"),
+  );
+  if (contentLines.length > 0) {
+    return contentLines.slice(-10).join("\n").trim();
+  }
+
+  return "Run completed (no text response produced).";
+}
+
+// ---------------------------------------------------------------------------
+// Persona file loading (#124)
+// ---------------------------------------------------------------------------
+
+/**
+ * Load agent persona content from the instructions file path configured by
+ * Paperclip (supportsInstructionsBundle). Returns empty string on any error
+ * so a missing file never blocks execution.
+ */
+export async function loadPersonaFile(filePath: string): Promise<string> {
+  try {
+    const content = await readFile(filePath, "utf8");
+    return content.trim();
+  } catch {
+    return "";
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Artifact upload (#170)
+// ---------------------------------------------------------------------------
+
+/**
+ * After Hermes execution, scan for files in the `artifacts/` directory under
+ * the working directory and upload each as a Paperclip issue attachment.
+ * This lets agents write deliverables (reports, data files, etc.) to a
+ * well-known location and have them surfaced in the Paperclip run viewer.
+ */
+async function uploadArtifacts(
+  ctx: AdapterExecutionContext,
+  cwd: string,
+  paperclipApiUrl: string,
+  taskId: string | null,
+): Promise<void> {
+  if (!taskId || !ctx.authToken) return;
+
+  const artifactDir = path.resolve(cwd, "artifacts");
+
+  let files: import("node:fs").Dirent[];
+  try {
+    files = await readdir(artifactDir, { withFileTypes: true });
+  } catch {
+    return; // artifacts/ doesn't exist — nothing to upload
+  }
+
+  for (const file of files) {
+    if (!file.isFile()) continue;
+    const filePath = path.join(artifactDir, file.name);
+
+    let fileBlob: Blob;
+    try {
+      const buf = await readFile(filePath);
+      // Slice to a plain ArrayBuffer so Blob constructor is satisfied regardless
+      // of whether Node returns a Buffer backed by SharedArrayBuffer or ArrayBuffer.
+      const ab = buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength) as ArrayBuffer;
+      fileBlob = new Blob([ab]);
+    } catch {
+      continue;
+    }
+
+    try {
+      const formData = new FormData();
+      formData.append("file", fileBlob, file.name);
+
+      const endpoint = `${paperclipApiUrl}/companies/${ctx.agent.companyId}/issues/${taskId}/attachments`;
+      const response = await fetch(endpoint, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${ctx.authToken}`,
+          "X-Paperclip-Run-Id": ctx.runId,
+        },
+        body: formData,
+      });
+
+      await response.text(); // drain body to prevent socket leak (#89)
+
+      if (response.ok) {
+        await ctx.onLog("stdout", `[hermes] Uploaded artifact: ${file.name}\n`);
+      } else {
+        await ctx.onLog(
+          "stdout",
+          `[hermes] WARNING: artifact upload failed for ${file.name} (${response.status})\n`,
+        );
+      }
+    } catch (err) {
+      await ctx.onLog(
+        "stdout",
+        `[hermes] WARNING: artifact upload error for ${file.name}: ${err}\n`,
+      );
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Concurrency guard (#90)
 // ---------------------------------------------------------------------------
 
@@ -545,8 +720,21 @@ export async function execute(
     };
   }
   if (agentId) IN_FLIGHT_AGENTS.add(agentId);
+
+  // ── Load persona file (#124) ───────────────────────────────────────────
+  // Paperclip writes the agent's instructions bundle path into config when
+  // supportsInstructionsBundle is true in the ServerAdapterModule.
+  const instructionsFilePath = cfgString(config.instructionsFilePath);
+  let personaContent = "";
+  if (instructionsFilePath) {
+    personaContent = await loadPersonaFile(instructionsFilePath);
+    if (personaContent) {
+      await ctx.onLog("stdout", `[hermes] Loaded persona from ${instructionsFilePath} (${personaContent.length} chars)\n`);
+    }
+  }
+
   // ── Build prompt ───────────────────────────────────────────────────────
-  const prompt = buildPrompt(ctx, config);
+  const prompt = buildPrompt(ctx, config, personaContent);
 
   // ── Build command args ─────────────────────────────────────────────────
   // Use -Q (quiet) to get clean output: just response + session_id line
@@ -699,7 +887,14 @@ export async function execute(
         /Successfully registered all tools/.test(trimmed) ||
         /MCP [Ss]erver/.test(trimmed) ||
         /tool registered successfully/.test(trimmed) ||
-        /Application initialized/.test(trimmed);
+        /Application initialized/.test(trimmed) ||
+        // MCP ClosedResourceError (#104): MCP SDK throws when the server process exits
+        // before the adapter finishes reading — this is expected on Hermes shutdown and
+        // should never surface as a red error in the run viewer.
+        /ClosedResourceError/.test(trimmed) ||
+        /Connection closed/.test(trimmed) ||
+        /write EPIPE/.test(trimmed) ||
+        /Error: read ECONNRESET/.test(trimmed);
       if (isBenign) {
         return ctx.onLog("stdout", chunk);
       }
@@ -768,9 +963,13 @@ export async function execute(
     executionResult.costUsd = parsed.costUsd;
   }
 
-  // Summary from agent response
+  // Summary from agent response — fall back to tool transcript if response is empty (#121)
   if (parsed.response) {
     executionResult.summary = parsed.response.slice(0, 2000);
+  } else if (result.stdout) {
+    const fallback = buildToolTranscriptFallback(result.stdout);
+    executionResult.summary = fallback.slice(0, 2000);
+    await ctx.onLog("stdout", `[hermes] No text response — using tool-transcript fallback summary\n`);
   }
 
   // Set resultJson so Paperclip can persist run metadata (used for UI display + auto-comments)
@@ -836,6 +1035,24 @@ export async function execute(
       console.warn(`[hermes-adapter] Error posting usage data:`, error);
     }
   }
+
+  // ── Upload artifacts (#170) ────────────────────────────────────────────
+  // Scan the `artifacts/` directory in the working directory and upload any
+  // files found as Paperclip issue attachments. Non-fatal — a missing
+  // artifacts/ is expected in most runs.
+  const taskCtxForArtifacts = (ctx.context ?? {}) as {
+    taskId?: unknown;
+    issueId?: unknown;
+    paperclipWake?: { issue?: { id?: unknown } };
+    paperclipIssue?: { id?: unknown };
+  };
+  const artifactTaskId =
+    cfgString(taskCtxForArtifacts.taskId) ||
+    cfgString(taskCtxForArtifacts.issueId) ||
+    cfgString(taskCtxForArtifacts.paperclipWake?.issue?.id) ||
+    cfgString(taskCtxForArtifacts.paperclipIssue?.id) ||
+    null;
+  await uploadArtifacts(ctx, cwd, paperclipApiUrl, artifactTaskId);
 
   if (agentId) IN_FLIGHT_AGENTS.delete(agentId);
   return executionResult;

@@ -241,6 +241,33 @@ async function checkProviderConsistency(
 }
 
 // ---------------------------------------------------------------------------
+// ESM-safe Python detection (#105)
+// ---------------------------------------------------------------------------
+
+/**
+ * Detect the Python 3 executable available on PATH using ESM-safe async execFile.
+ *
+ * The upstream adapter used require() inside an ESM module body — which works
+ * on some platforms but fails on macOS with strict ESM resolution. This
+ * function uses the ESM-compatible promisified execFile instead (#105).
+ *
+ * Returns the first working python3/python binary, or throws if none is found.
+ */
+export async function getHermesPython(): Promise<string> {
+  for (const candidate of ["python3", "python"]) {
+    try {
+      await execFileAsync(candidate, ["--version"], { timeout: 5_000 });
+      return candidate;
+    } catch {
+      // try next candidate
+    }
+  }
+  throw new Error(
+    "Python 3.10+ not found in PATH. Install from https://python.org before using Hermes Agent.",
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Main test
 // ---------------------------------------------------------------------------
 
