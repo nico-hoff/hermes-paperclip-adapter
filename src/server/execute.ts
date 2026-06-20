@@ -379,7 +379,7 @@ export function parseHermesOutput(stdout: string, stderr: string): ParsedOutput 
     // Legacy format (non-quiet mode) — only accept structured session IDs in
     // Hermes format (YYYYMMDD_HHMMSS_<hex>) to prevent prose like
     // "session ID from a previous run" from being captured as a session ID.
-    const legacyMatch = combined.match(/\n(?:session[_](?:id|saved)|Session[_]ID)[:\s]+(\d{8}_\d{6}_[a-f0-9]+)/i);
+    const legacyMatch = combined.match(/\n(?:session[_ ](?:id|saved)|Session[_ ]ID)[:\s]+(\d{8}_\d{6}_[a-f0-9]+)/i);
     if (legacyMatch?.[1]) {
       result.sessionId = legacyMatch[1];
     }
@@ -419,6 +419,16 @@ export function parseHermesOutput(stdout: string, stderr: string): ParsedOutput 
 
   return result;
 }
+
+// ---------------------------------------------------------------------------
+// Concurrency guard (#90)
+// ---------------------------------------------------------------------------
+
+// Track agents that currently have a Hermes run in flight. A second concurrent
+// run for the same agent serializes on Hermes session files and causes Paperclip
+// to spawn additional retries, creating a self-reinforcing retry storm that fills
+// the 10-min run backlog. Returning early breaks the cycle.
+const IN_FLIGHT_AGENTS = new Set<string>();
 
 // ---------------------------------------------------------------------------
 // Main execute
@@ -512,6 +522,29 @@ export async function execute(
     };
   }
 
+
+  // ── Concurrency guard (#90) ────────────────────────────────────────────────────────────────
+  // Skip if this agent already has a Hermes run in flight. Concurrent runs
+  // serialize on Hermes session files, inflating latency and triggering
+  // Paperclip to spawn additional retries, forming a self-perpetuating
+  // retry storm (#90).
+  const agentId = ctx.agent?.id ?? null;
+  if (agentId && IN_FLIGHT_AGENTS.has(agentId)) {
+    await ctx.onLog(
+      "stdout",
+      `[hermes] Skipping run — another run is already in progress for this agent (guard #90)\n`,
+    );
+    return {
+      exitCode: 0,
+      signal: null,
+      timedOut: false,
+      provider: resolvedProvider,
+      model,
+      summary: "Skipped: another run is already in progress for this agent (guard #90).",
+      resultJson: { result: "", session_id: null, usage: null, cost_usd: null },
+    };
+  }
+  if (agentId) IN_FLIGHT_AGENTS.add(agentId);
   // ── Build prompt ───────────────────────────────────────────────────────
   const prompt = buildPrompt(ctx, config);
 
@@ -610,6 +643,13 @@ export async function execute(
     cfgString(ctx.config?.taskId);
   if (taskId) env.PAPERCLIP_TASK_ID = taskId;
 
+  // Inject PAPERCLIP_API_URL so Hermes's curl calls reach the local Paperclip
+  // instance. paperclipApiUrl has /api appended — strip it so the env var is
+  // the bare base URL that paperclipai CLI and curl workflows expect (closes #117).
+  env.PAPERCLIP_API_URL = paperclipApiUrl.replace(/\/api$/, "");
+  if (ctx.agent?.id) env.PAPERCLIP_AGENT_ID = ctx.agent.id;
+  if (ctx.agent?.companyId) env.PAPERCLIP_COMPANY_ID = ctx.agent.companyId;
+
   // Inject agent-configured env vars. Only string values are merged; an
   // unresolved secret_ref descriptor (or any non-string) is skipped and
   // surfaced as a warning rather than coerced to "[object Object]" — see
@@ -681,14 +721,20 @@ export async function execute(
       void ctx.onLog("stdout", "[hermes] working…\n");
     }
   }, 10_000);
-  const result = await runChildProcess(ctx.runId, hermesCmd, args, {
-    cwd,
-    env,
-    timeoutSec,
-    graceSec,
-    onLog: wrappedOnLog,
-    onSpawn: ctx.onSpawn,
-  }).finally(() => clearInterval(keepAlive));
+  let result;
+  try {
+    result = await runChildProcess(ctx.runId, hermesCmd, args, {
+      cwd,
+      env,
+      timeoutSec,
+      graceSec,
+      onLog: wrappedOnLog,
+      onSpawn: ctx.onSpawn,
+    }).finally(() => clearInterval(keepAlive));
+  } catch (err) {
+    if (agentId) IN_FLIGHT_AGENTS.delete(agentId);
+    throw err;
+  }
 
   // ── Parse output ───────────────────────────────────────────────────────
   const parsed = parseHermesOutput(result.stdout || "", result.stderr || "");
@@ -773,10 +819,16 @@ export async function execute(
         body: JSON.stringify(payload),
       });
 
+      // Always consume the response body — undici keeps the underlying socket
+      // in CLOSE_WAIT until the body is drained, exhausting file descriptors
+      // after many heartbeats (#89).
+      const bodyText = await response.text();
+
       if (!response.ok) {
         // Log warning but don't throw — usage reporting is not critical to execution
         console.warn(
-          `[hermes-adapter] Failed to post usage data to Paperclip: ${response.status} ${response.statusText}`
+          `[hermes-adapter] Failed to post usage data to Paperclip: ${response.status} ${response.statusText}`,
+          bodyText.slice(0, 200),
         );
       }
     } catch (error) {
@@ -785,5 +837,6 @@ export async function execute(
     }
   }
 
+  if (agentId) IN_FLIGHT_AGENTS.delete(agentId);
   return executionResult;
 }
