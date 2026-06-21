@@ -1,5 +1,11 @@
 # hermes-paperclip-adapter-pow
 
+> [!WARNING]
+> **This fork is no longer maintained.**
+> The community has converged on **[HenkDz/hermes-paperclip-adapter](https://github.com/HenkDz/hermes-paperclip-adapter)** (`@henkey/hermes-paperclip-adapter`) as the canonical maintained fork.
+> HenkDz is the author of the Paperclip external adapter/plugin system and his fork is architecturally aligned with the current Paperclip loader/runtime contract.
+> Please use that instead — this repo will not receive further updates.
+
 > **Community PoW (Proof of Work) fork** of [NousResearch/hermes-paperclip-adapter](https://github.com/NousResearch/hermes-paperclip-adapter).
 > The upstream repo has 56 open issues and 86 open PRs with zero maintainer activity since March 2026.
 > This fork cherry-picks all high-quality community PRs, adds P2 features, and publishes under a distinct npm name.
